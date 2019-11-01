@@ -1,0 +1,210 @@
+apiVersion: v1
+kind: Template
+message: |-
+  Obs: Deve ser criado Storage para persistência do elasticsearch
+
+  Foram criados os seguintes itens para o projeto:
+
+  1 - Build que modifica a imagem padrão para o usuário default com UID 1001.
+
+  2 - Secret no docker.io para pull da imagem
+
+  3 - Rotas para acesso ao web Methods e Integration Server.
+  3.1 - As rotas podem ser alteradas conforme necessário.
+
+  4 - Serviços expondo as portas do container para as rotas.
+
+  5 - Deployment que indica:
+  5.1 - Número de replicas que devem ser executadas.
+  5.2 - Configurações de autoscale.
+  5.3 - HealthChecks para a o container em execução.
+  5.4 - Configurações de volume.
+
+  6 - Estrutura Elastic para persistência dos dados
+  6.1 - Volume para o Elasticsearch
+
+  O aplicativo pode levar alguns minutos para ser iniciado, dependendo da conexão com a internet.
+metadata:
+  name: apigateway
+  annotations:
+    description: |-
+      Neste template serão criados os objetos necessários para execução da imagem apigateway nos projetos do Openshift com base em configurações de SCC.
+    tags: apigateway
+
+labels:
+  app: apigateway
+  servico: api
+
+objects:
+
+- apiVersion: v1
+  data:
+    .dockerconfigjson: ewoJImF1dGhzIjogewoJCSJodHRwczovL2luZGV4LmRvY2tlci5pby92MS8iOiB7CgkJCSJhdXRoIjogIllXbDJiMnRwT2t4QWNtRnVhbUV4TWpNPSIKCQl9Cgl9Cn0=
+  kind: Secret
+  metadata:
+    name: dockerio
+  type: kubernetes.io/dockerconfigjson
+
+- apiVersion: v1
+  kind: ImageStream
+  metadata:
+    name: apigateway
+    labels:
+        app: apigateway
+        servico: imagestream
+
+- apiVersion: v1
+  kind: BuildConfig
+  metadata:
+    name: apigateway-base
+    labels:
+      app: apigateway
+      servico: apigateway-build
+  spec:
+    runPolicy: SerialLatestOnly
+    source:
+      dockerfile: |-
+        FROM docker.io/store/softwareag/apigateway-trial:10.4
+        USER root
+        RUN usermod -u 1001 -l default sagadmin
+        USER 1001
+      type: Dockerfile
+    strategy:
+      dockerStrategy:
+        from:
+          kind: DockerImage
+          name: docker.io/store/softwareag/apigateway-trial:10.4
+        pullSecret:
+          name: dockerio
+    output:
+      to:
+        kind: "ImageStreamTag"
+        name: "apigateway:latest"
+    triggers:
+    - imageChange: {}
+      type: ImageChange
+    - type: ConfigChange
+
+- apiVersion: v1
+  kind: DeploymentConfig
+  metadata:
+    name: apigateway
+  spec:
+    template:
+      metadata:
+        labels:
+          name: apigateway
+      spec:
+        containers:
+          - name: apigw
+            image: apigateway
+            ports:
+              - containerPort: 5555
+                protocol: TCP
+              - containerPort: 9072
+                protocol: TCP
+              - containerPort: 9999
+                protocol: TCP
+            livenessProbe:
+              exec:
+                command:
+                - /bin/bash
+                - -c
+                - ps -C startContainer.sh
+              failureThreshold: 3
+              initialDelaySeconds: 10
+              periodSeconds: 10
+              successThreshold: 1
+              timeoutSeconds: 30
+            readinessProbe:
+              failureThreshold: 3
+              httpGet:
+                path: /rest/apigateway/health
+                port: 5555
+                scheme: HTTP
+              initialDelaySeconds: 200
+              periodSeconds: 10
+              successThreshold: 1
+              timeoutSeconds: 60
+            resources:
+              limits:
+                cpu: "4"
+                memory: 6Gi
+              requests:
+                cpu: "1"
+                memory: 250Mi
+    replicas: 1
+    triggers:
+      - type: ConfigChange
+      - type: ImageChange
+        imageChangeParams:
+          automatic: true
+          containerNames:
+            - apigw
+          from:
+            kind: ImageStreamTag
+            name: "apigateway:latest"
+    strategy:
+      type: Rolling
+    paused: false
+    revisionHistoryLimit: 2
+    minReadySeconds: 8
+    selector:
+      name: apigateway
+
+- apiVersion: v1
+  kind: Service
+  metadata:
+    name: apigateway
+  spec:
+    ports:
+      - name: integration-server
+        port: 5555
+        targetPort: 5555
+      - name: web-methods
+        port: 9072
+        targetPort: 9072
+      - name: apigateway-9999
+        port: 9999
+        targetPort: 9999
+    selector:
+      name: apigateway
+
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: apigateway
+      servico: api
+    name: web-methods
+  spec:
+    path: /apigatewayui
+    hostname: "${URL}"
+    port:
+      targetPort: web-methods
+    tls:
+      termination: edge
+    to:
+      kind: Service
+      name: apigateway
+      weight: 100
+    wildcardPolicy: None
+
+- apiVersion: v1
+  kind: Route
+  metadata:
+    labels:
+      app: apigateway
+      servico: api
+    name: integration-server
+  spec:
+    hostname: "${URL}"
+    port:
+      targetPort: integration-server
+    tls:
+      termination: edge
+    to:
+      kind: Service
+      name: apigateway
+      weight: 100
+    wildcardPolicy: None
